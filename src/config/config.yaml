@@ -1,3 +1,8 @@
 logging:
   directory: files
   filename: events.log
+
+authentication:
+  auth_details:
+    directory: files
+    filename: auth_details.csv

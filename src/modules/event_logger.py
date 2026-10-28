@@ -3,6 +3,14 @@ import yaml
 import logging
 
 '''
+PURPOSE:
+Logs each interaction with the ADC
+
+DEBUG for normal events such as sensor reading, external communication
+INFO for door/cabinet open/close
+WARNING for warnings
+ERROR for errors
+
 USAGE:
 
 log = EventLogger().logger
@@ -12,7 +20,7 @@ log.info("Cabinet unlocked by user XXXXXXX")
 
 class EventLogger:
     def __init__(self):
-        #set up logging file based on configs
+        #find logging file location/path based on configs
         project_root = Path(__file__).resolve().parents[1]
         with open(project_root / "config" / "config.yaml") as f:
             self.config = yaml.safe_load(f) #load the config file
@@ -25,7 +33,7 @@ class EventLogger:
         #create logger
         self.logger = logging.getLogger("event_logger")
         self.logger.setLevel(logging.DEBUG)
-        self.logger.propagate = False
+        self.logger.propagate = False #apparently needed to avoid instactiating multiple times
 
         #add handlers
         if not self.logger.handlers:
