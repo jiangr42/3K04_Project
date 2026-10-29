@@ -1,0 +1,7 @@
+2026-10-29 16:15:52,859 - event_logger - INFO - created auth details file at C:\Users\cultu\OneDrive\Documents\Mcmaster\3K04\Project\3K04_Project\src\files\auth_details.csv
+2026-10-29 16:16:43,654 - event_logger - INFO - user LEO added with level User
+2026-10-29 16:18:50,382 - event_logger - WARNING - user LEO attempted log in, password incorrect
+2026-10-29 16:19:49,308 - event_logger - WARNING - user LEO attempted log in, password incorrect
+2026-10-29 16:19:54,783 - event_logger - WARNING - user LEO attempted log in, password incorrect
+2026-10-29 16:20:08,443 - event_logger - WARNING - user LEO attempted log in, password incorrect, password is 12345
+2026-10-29 16:20:41,197 - event_logger - INFO - user LEO log in successful, user level: User
