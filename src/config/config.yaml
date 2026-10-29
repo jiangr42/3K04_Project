@@ -6,3 +6,7 @@ authentication:
   auth_details:
     directory: files
     filename: auth_details.csv
+
+inventory:
+  directory: files
+  filename: inventory.csv
