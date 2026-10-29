@@ -86,6 +86,40 @@ class Authenticator:
         self.log.info(f"user {username} deleted")
         return 0
 
+    def edit_user(self, username, **changes): #edits fields of a user, example: edit_user("bob", password="new", level="user")
+        #if success return 0, if sys error or invalid field return 1, if no user return 2
+
+        #**changes is used because we might want to not change certain info
+        invalid = [field for field in changes if field not in FIELDNAMES or field == "username"] #fields that are not allowed to be changed
+        if invalid:
+            self.log.error(f"cannot edit user {username}, invalid fields: {invalid}")
+            return 1
+
+        try:
+            #read every row, keeping all columns
+            with open(self.auth_path, newline="", encoding="utf-8") as f:
+                rows = list(csv.DictReader(f))
+
+            for row in rows:
+                if row["username"] == username:
+                    row.update(changes)
+                    break
+            else:
+                self.log.warning(f"user {username} not found, cannot be edited")
+                return 2
+
+            #rewrite the file with the edited row
+            with open(self.auth_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
+                writer.writeheader()
+                writer.writerows(rows)
+        except OSError as e:
+            self.log.error(f"failed to edit user {username}: {e}")
+            return 1
+
+        self.log.info(f"user {username} edited, changed fields: {list(changes)}")
+        return 0
+
     def load_users(self):
         users = {}
         with open(self.auth_path, newline="", encoding="utf-8") as f:
@@ -95,7 +129,6 @@ class Authenticator:
                     "password": row["password"], 
                     "last_login_attempt": row["last_login_attempt"],
                     "consecutive_failed_attempts": row["consecutive_failed_attempts"]
-
                 }
         return users
 
@@ -107,6 +140,8 @@ class Authenticator:
         if user is None:
             self.log.warning(f"user {username} attempted log in, user not found")
             return (2, None)
+
+        if user["Consecutive"]
         if user["password"] != str(password):
             self.log.warning(f"user {username} attempted log in, password incorrect, password is {password}")
             return (1, None)
