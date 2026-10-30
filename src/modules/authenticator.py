@@ -141,9 +141,9 @@ class Authenticator:
             self.log.warning(f"user {username} attempted log in, user not found")
             return (2, None)
 
-        if user["Consecutive"]
-        if user["password"] != str(password):
-            self.log.warning(f"user {username} attempted log in, password incorrect, password is {password}")
-            return (1, None)
-        self.log.info(f"user {username} log in successful, user level: {user["level"]}")
-        return (0, user["level"])
+        if user["Consecutive"]:
+            if user["password"] != str(password):
+                self.log.warning(f"user {username} attempted log in, password incorrect, password is {password}")
+                return (1, None)
+            self.log.info(f"user {username} log in successful, user level: {user["level"]}")
+            return (0, user["level"])
