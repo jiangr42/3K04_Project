@@ -2,6 +2,7 @@ from modules.event_logger import EventLogger
 from pathlib import Path
 import yaml
 import csv
+import time
 '''
 PURPOSE
 
@@ -15,6 +16,8 @@ Also updates auth_detail.csv based on management system requests
 '''
 
 FIELDNAMES = ["username", "password", "level", "last_login_attempt", "consecutive_failed_attempts"]
+ALLOWED_CONSECUTIVE_FAILED_LOGINS = 3
+LOCKOUT_PERIOD = 60 #lock out time in seconds
 
 class Authenticator:
     def __init__(self):
@@ -141,9 +144,13 @@ class Authenticator:
             self.log.warning(f"user {username} attempted log in, user not found")
             return (2, None)
 
-        if user["Consecutive"]
+        Lock_out_time = time.time() - float(user["last_login_attempt"]) #
+        if (user["consecutive_failed_attempts"] > ALLOWED_CONSECUTIVE_FAILED_LOGINS) and (Lock_out_time > LOCKOUT_PERIOD ):
+            self.log.warning(f"user {username} attempted log in, password incorrect, password is {password}")
+
         if user["password"] != str(password):
             self.log.warning(f"user {username} attempted log in, password incorrect, password is {password}")
             return (1, None)
+        
         self.log.info(f"user {username} log in successful, user level: {user["level"]}")
         return (0, user["level"])
