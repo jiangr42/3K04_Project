@@ -1,4 +1,4 @@
-from modules.event_logger import EventLogger
+from event_logger import EventLogger
 from pathlib import Path
 import yaml
 import csv
@@ -10,12 +10,13 @@ does authentication of users, supports multiple methods, which are each their ow
 authenticator gets called upon by other auth methods such as 
 username password log in from GUI, and card reader module
 
-Checks details against auth_details.csv, logs result and gives user level
+Checks details against auth_details.csv, logs result and gives user level, and allowed meds
 
 Also updates auth_detail.csv based on management system requests
 '''
 
-FIELDNAMES = ["username", "password", "level", "last_login_attempt", "consecutive_failed_attempts"]
+FIELDNAMES = ["username", "password", "level", "last_login_attempt", "consecutive_failed_attempts", "allowed_medication"]
+MEDICATION_SEPARATOR = ";" #allowed_medication is stored in one CSV cell, e.g. "advil;tylenol"
 ALLOWED_CONSECUTIVE_FAILED_LOGINS = 3
 LOCKOUT_PERIOD = 60 #lock out time in seconds
 
@@ -43,10 +44,10 @@ class Authenticator:
                 csv.DictWriter(f, fieldnames=FIELDNAMES).writeheader()
             self.log.info(f"created auth details file at {self.auth_path}")
 
-    def add_user(self, username, password, level): #adds a user to the auth file. if success return 0
+    def add_user(self, username, password, level, allowed_medication=()): #adds a user to the auth file. if success return 0
         #if sys error return 1, if user already exists return 2
         try:
-            current_users = self.load_users()
+            current_users = self.load_users()#load all users in a dict containing all associated info
 
             #determine if user already exists
             if (username in current_users):
@@ -56,7 +57,8 @@ class Authenticator:
             #add user into current users, then write it into CSV
             with open(self.auth_path, "a", newline="", encoding="utf-8") as f:
                 csv.DictWriter(f, fieldnames=FIELDNAMES).writerow(
-                    {"username": username, "password": password, "level": level, "last_login_attempt": 0, "consecutive_failed_attempts": 0}
+                    {"username": username, "password": password, "level": level, "last_login_attempt": 0, "consecutive_failed_attempts": 0,
+                     "allowed_medication": MEDICATION_SEPARATOR.join(allowed_medication)}
                 )
         except OSError as e:
             self.log.error(f"failed to add user {username}: {e}")
@@ -68,11 +70,14 @@ class Authenticator:
     def delete_user(self, username): #removes a user from the auth file. if success return 0
         #if sys error return 1, if no user return 2
         try:
-            #read every row, keeping all columns
+             #get list of all rows as dicts 
             with open(self.auth_path, newline="", encoding="utf-8") as f:
                 rows = list(csv.DictReader(f))
 
+            #create new list of rows, except the row with the username give
             remaining = [row for row in rows if row["username"] != username]
+
+            #if no change, then user is not found
             if len(remaining) == len(rows):
                 self.log.warning(f"user {username} not found, cannot be deleted")
                 return 2
@@ -98,13 +103,18 @@ class Authenticator:
             self.log.error(f"cannot edit user {username}, invalid fields: {invalid}")
             return 1
 
+        #allowed_medication is given as a list, convert it to the string stored in the CSV
+        if "allowed_medication" in changes:
+            changes["allowed_medication"] = MEDICATION_SEPARATOR.join(changes["allowed_medication"])
+
         try:
-            #read every row, keeping all columns
+            #get list of all rows as dicts
             with open(self.auth_path, newline="", encoding="utf-8") as f:
                 rows = list(csv.DictReader(f))
 
             for row in rows:
                 if row["username"] == username:
+                    #if the right user, appply changes
                     row.update(changes)
                     break
             else:
@@ -131,26 +141,45 @@ class Authenticator:
                     "level": row["level"],
                     "password": row["password"], 
                     "last_login_attempt": row["last_login_attempt"],
-                    "consecutive_failed_attempts": row["consecutive_failed_attempts"]
+                    "consecutive_failed_attempts": row["consecutive_failed_attempts"],
+                    "allowed_medication": row["allowed_medication"].split(MEDICATION_SEPARATOR) if row["allowed_medication"] else [],
                 }
         return users
 
     def check_username_password(self, username, password): #given username, check if password is correct
+        #also checks if log in is valid, if user is locked out return 3
 
-        #returns a tuple, first int is status, 0 is success, 1 is failed, 2 is user not found. second string user level
+        #returns a tuple, first int is status, 0 is success, 1 is failed, 2 is user not found, 3 is locked out.
+        #second string user level
+        #third is a list of allowed meds
+
         users = self.load_users()
         user = users.get(username)
         if user is None:
             self.log.warning(f"user {username} attempted log in, user not found")
-            return (2, None)
+            return (2, None, None)
 
-        Lock_out_time = time.time() - float(user["last_login_attempt"]) #
-        if (user["consecutive_failed_attempts"] > ALLOWED_CONSECUTIVE_FAILED_LOGINS) and (Lock_out_time > LOCKOUT_PERIOD ):
-            self.log.warning(f"user {username} attempted log in, password incorrect, password is {password}")
+        #get values about if the user is locked out
+        failed_attempts = int(user["consecutive_failed_attempts"])
+        time_since_last_attempt = time.time() - float(user["last_login_attempt"])
+
+        #locked out if too many failed attempts and the lockout period hasn't passed yet
+        if failed_attempts >= ALLOWED_CONSECUTIVE_FAILED_LOGINS:
+            if time_since_last_attempt < LOCKOUT_PERIOD:
+                remaining = int(LOCKOUT_PERIOD - time_since_last_attempt)
+                self.log.warning(f"user {username} attempted log in, locked out for {remaining} more seconds")
+                return (3, None, None)
+            failed_attempts = 0 #lockout period is over, give the user a fresh set of attempts
 
         if user["password"] != str(password):
-            self.log.warning(f"user {username} attempted log in, password incorrect, password is {password}")
-            return (1, None)
-        
-        self.log.info(f"user {username} log in successful, user level: {user["level"]}")
-        return (0, user["level"])
+            #add one failed attempt
+            failed_attempts += 1
+            #update the last attempt time to now
+            self.edit_user(username, consecutive_failed_attempts=failed_attempts, last_login_attempt=time.time())
+            self.log.warning(f"user {username} attempted log in, password incorrect, failed attempts: {failed_attempts}")
+            return (1, None, None)
+
+        #successful log in, reset failed attempts
+        self.edit_user(username, consecutive_failed_attempts=0, last_login_attempt=time.time())
+        self.log.info(f"user {username} log in successful, user level: {user['level']}")
+        return (0, user["level"], user["allowed_medication"])
