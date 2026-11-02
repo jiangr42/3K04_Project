@@ -51,3 +51,11 @@ class EventLogger:
 
             self.logger.addHandler(fh)
             self.logger.addHandler(ch)
+
+    def clr_logs(self):
+        #clears all logs, should be only allowed by admin
+        try:
+            with open(self.output_file_path, "w") as f:
+                return 0
+        except OSError:
+            return 1

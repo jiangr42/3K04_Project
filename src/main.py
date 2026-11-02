@@ -1,4 +1,4 @@
-
+from modules.cabinet_controller import Cabinet_Controller
 '''
 authenticator: screen asks user for username and password
 - if username is found and password matches, then given access
@@ -26,4 +26,6 @@ once logged in: go to screen that allows user to choose medication
 
 
 print("3K04 Deliverable 2")
+
+Controller = Cabinet_Controller()
 
