@@ -3,6 +3,16 @@ from pathlib import Path
 import yaml
 import csv
 
+'''
+PURPOSE
+
+tracks medicine inventory across multiple cabinets
+stores medicine quantities in an inventory CSV file
+
+supports adding, dispensing, viewing, and resetting medicine quantities
+logs inventory changes and errors through EventLogger
+'''
+
 FIELDNAMES = ["cabinet", "medicine", "quantity"]
 
 class InventoryTracker:
@@ -10,7 +20,7 @@ class InventoryTracker:
         #create logger
         self.log = EventLogger().logger
 
-        #find auth file location/path based on configs
+        #find inventory file location/path based on configs
         project_root = Path(__file__).resolve().parents[1]
         with open(project_root / "config" / "config.yaml") as f:
             self.config = yaml.safe_load(f) #load the config file
@@ -30,18 +40,24 @@ class InventoryTracker:
             self.log.info(f"created inv details file at {self.inv_path}")
 
     def get_inventory(self):
-        
-        return 0
+        # returns all inventory details
+        try:
+            with open(self.inv_file_path, newline="", encoding="utf-8") as f:
+                rows = list(csv.DictReader(f))
+
+        except OSError as e:
+            self.log.error(f"Failed to retrieve inventory: {e}")
+            return None
+
+        return rows
 
     def add_medicine(self, cabinet, medicine, quantity):
-        '''add a medicine
-        
-        self.cabinet.medicine += medicine.quantity
-
-
-        '''
-       
         # if success return 0, if sys error or invalid input return 1
+
+        if not isinstance(quantity, int) or quantity <= 0:
+            self.log.error("invalid quantity, must be a positive integer")
+            return 1
+       
         try:
             # read every row from the inventory file
             with open(self.inv_file_path, newline="", encoding="utf-8") as f:
@@ -73,13 +89,12 @@ class InventoryTracker:
         self.log.info(f"added {quantity} of {medicine} to cabinet {cabinet}")
         return 0
 
-
     def dispense_medicine(self, cabinet, medicine, quantity):
         # if success return 0, if sys error or invalid input return 1
         # if medicine not found return 2
 
-        if quantity <= 0:
-            self.log.error("dispense quantity must be positive")
+        if not isinstance(quantity, int) or quantity <= 0:
+            self.log.error("invalid dispense quantity, must be a positive integer")
             return 1
 
         try:
@@ -105,9 +120,7 @@ class InventoryTracker:
                             f"requested {quantity}, dispensed {dispensed}"
                         )
                     else:
-                        self.log.info(
-                            f"dispensed {dispensed} of {medicine} from cabinet {cabinet}"
-                        )
+                        self.log.info(f"dispensed {dispensed} of {medicine} from cabinet {cabinet}")
 
                     break
 
@@ -122,15 +135,33 @@ class InventoryTracker:
                 writer.writerows(rows)
 
         except (OSError, ValueError) as e:
-            self.log.error(f"failed to dispense {medicine}: {e}")
+            self.log.error(f"failed to dispense {medicine} from cabinet {cabinet}: {e}")
             return 1
 
         return 0
     
     def reset_medicine(self):
-        '''
-        for medicine in cabinet:
-            medicine quantity = 0
-        '''
+        #if success return 0, if sys error return 1
+
+        try:
+            #read every row from the inventory file
+            with open(self.inv_file_path, newline="", encoding="utf-8") as f:
+                rows = list(csv.DictReader(f))
+
+            #set every medicine quantity to zero
+            for row in rows:
+                row["quantity"] = "0"
+
+            #rewrite the file with updated quantities
+            with open(self.inv_file_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
+                writer.writeheader()
+                writer.writerows(rows)
+
+        except (OSError, ValueError) as e:
+            self.log.error(f"failed to reset inventory: {e}")
+            return 1
+
+        self.log.info("all medicine quantities reset to zero")
         return 0
     
