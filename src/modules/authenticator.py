@@ -1,4 +1,4 @@
-from event_logger import EventLogger
+from modules.event_logger import EventLogger
 from pathlib import Path
 import yaml
 import csv
@@ -13,6 +13,8 @@ username password log in from GUI, and card reader module
 Checks details against auth_details.csv, logs result and gives user level, and allowed meds
 
 Also updates auth_detail.csv based on management system requests
+
+Only checks credentials. Deciding if a user may log in to the current state is done by cabinet_controller
 '''
 
 FIELDNAMES = ["username", "password", "level", "last_login_attempt", "consecutive_failed_attempts", "allowed_medication"]
@@ -47,7 +49,7 @@ class Authenticator:
     def add_user(self, username, password, level, allowed_medication=()): #adds a user to the auth file. if success return 0
         #if sys error return 1, if user already exists return 2
         try:
-            current_users = self.load_users()#load all users in a dict containing all associated info
+            current_users = self._load_users()#load all users in a dict containing all associated info
 
             #determine if user already exists
             if (username in current_users):
@@ -134,6 +136,14 @@ class Authenticator:
         return 0
 
     def load_users(self):
+        #external version for other modules, same as _load_users but without passwords
+        users = self._load_users()
+        for user in users.values():
+            del user["password"]
+        return users
+
+    def _load_users(self):
+        #internal version, includes passwords, only for use inside the authenticator
         users = {}
         with open(self.auth_path, newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f):
@@ -145,7 +155,7 @@ class Authenticator:
                     "allowed_medication": row["allowed_medication"].split(MEDICATION_SEPARATOR) if row["allowed_medication"] else [],
                 }
         return users
-
+    
     def check_username_password(self, username, password): #given username, check if password is correct
         #also checks if log in is valid, if user is locked out return 3
 
@@ -153,7 +163,7 @@ class Authenticator:
         #second string user level
         #third is a list of allowed meds
 
-        users = self.load_users()
+        users = self._load_users()
         user = users.get(username)
         if user is None:
             self.log.warning(f"user {username} attempted log in, user not found")
@@ -168,6 +178,7 @@ class Authenticator:
             if time_since_last_attempt < LOCKOUT_PERIOD:
                 remaining = int(LOCKOUT_PERIOD - time_since_last_attempt)
                 self.log.warning(f"user {username} attempted log in, locked out for {remaining} more seconds")
+                
                 return (3, None, None)
             failed_attempts = 0 #lockout period is over, give the user a fresh set of attempts
 
@@ -178,6 +189,26 @@ class Authenticator:
             self.edit_user(username, consecutive_failed_attempts=failed_attempts, last_login_attempt=time.time())
             self.log.warning(f"user {username} attempted log in, password incorrect, failed attempts: {failed_attempts}")
             return (1, None, None)
+
+        #successful log in, reset failed attempts
+        self.edit_user(username, consecutive_failed_attempts=0, last_login_attempt=time.time())
+        self.log.info(f"user {username} log in successful, user level: {user['level']}")
+        return (0, user["level"], user["allowed_medication"])
+
+    def check_username(self, username): #given username, check if it is correct
+        #used for log in methods that "self authenticates" such as card or finger print
+
+        #can log a user in even if they are password locked out
+
+        #returns a tuple, first int is status, 0 is success, 2 is user not found
+        #second string user level
+        #third is a list of allowed meds
+
+        users = self._load_users()
+        user = users.get(username)
+        if user is None:
+            self.log.warning(f"user {username} attempted log in, user not found")
+            return (2, None, None)
 
         #successful log in, reset failed attempts
         self.edit_user(username, consecutive_failed_attempts=0, last_login_attempt=time.time())
