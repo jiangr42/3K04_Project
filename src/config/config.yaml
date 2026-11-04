@@ -10,3 +10,20 @@ authentication:
 inventory:
   directory: files
   filename: inventory.csv
+
+external_communication:
+  poll_interval: 0.05 #seconds between checks of the serial driver for new messages
+
+serial:
+  port: COM5
+  baudrate: 115200
+  bytesize: 8 
+  parity: "N" 
+  stopbits: 1 
+  timeout: 0.1 #read timeout in seconds
+  write_timeout: 1.0 #write timeout in seconds
+  xonxoff: false 
+  rtscts: false 
+  dsrdtr: false 
+  line_ending: "\n" #message terminator
+  rx_queue_size: 100 #max number of complete received messages buffered

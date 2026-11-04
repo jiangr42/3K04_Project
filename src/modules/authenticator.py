@@ -1,4 +1,5 @@
 from modules.event_logger import EventLogger
+from modules.status_codes import SUCCESS, ERROR, NOT_FOUND, ALREADY_EXISTS, INVALID_VALUE, PASSWORD_INCORRECT, LOCKED_OUT
 from pathlib import Path
 import yaml
 import csv
@@ -46,15 +47,15 @@ class Authenticator:
                 csv.DictWriter(f, fieldnames=FIELDNAMES).writeheader()
             self.log.info(f"created auth details file at {self.auth_path}")
 
-    def add_user(self, username, password, level, allowed_medication=()): #adds a user to the auth file. if success return 0
-        #if sys error return 1, if user already exists return 2
+    def add_user(self, username, password, level, allowed_medication=()): #adds a user to the auth file
+        #returns SUCCESS, ERROR (sys error), or ALREADY_EXISTS
         try:
             current_users = self._load_users()#load all users in a dict containing all associated info
 
             #determine if user already exists
             if (username in current_users):
                 self.log.warning(f"user {username} already exists, cannot be added")
-                return 2
+                return ALREADY_EXISTS
 
             #add user into current users, then write it into CSV
             with open(self.auth_path, "a", newline="", encoding="utf-8") as f:
@@ -64,13 +65,13 @@ class Authenticator:
                 )
         except OSError as e:
             self.log.error(f"failed to add user {username}: {e}")
-            return 1
+            return ERROR
 
         self.log.info(f"user {username} added with level {level}")
-        return 0
+        return SUCCESS
 
-    def delete_user(self, username): #removes a user from the auth file. if success return 0
-        #if sys error return 1, if no user return 2
+    def delete_user(self, username): #removes a user from the auth file
+        #returns SUCCESS, ERROR (sys error), or NOT_FOUND
         try:
              #get list of all rows as dicts 
             with open(self.auth_path, newline="", encoding="utf-8") as f:
@@ -82,7 +83,7 @@ class Authenticator:
             #if no change, then user is not found
             if len(remaining) == len(rows):
                 self.log.warning(f"user {username} not found, cannot be deleted")
-                return 2
+                return NOT_FOUND
 
             #rewrite the file without the deleted user
             with open(self.auth_path, "w", newline="", encoding="utf-8") as f:
@@ -91,19 +92,19 @@ class Authenticator:
                 writer.writerows(remaining)
         except OSError as e:
             self.log.error(f"failed to delete user {username}: {e}")
-            return 1
+            return ERROR
 
         self.log.info(f"user {username} deleted")
-        return 0
+        return SUCCESS
 
     def edit_user(self, username, **changes): #edits fields of a user, example: edit_user("bob", password="new", level="user")
-        #if success return 0, if sys error or invalid field return 1, if no user return 2
+        #returns SUCCESS, ERROR (sys error), INVALID_VALUE (invalid field), or NOT_FOUND
 
         #**changes is used because we might want to not change certain info
         invalid = [field for field in changes if field not in FIELDNAMES or field == "username"] #fields that are not allowed to be changed
         if invalid:
             self.log.error(f"cannot edit user {username}, invalid fields: {invalid}")
-            return 1
+            return INVALID_VALUE
 
         #allowed_medication is given as a list, convert it to the string stored in the CSV
         if "allowed_medication" in changes:
@@ -121,7 +122,7 @@ class Authenticator:
                     break
             else:
                 self.log.warning(f"user {username} not found, cannot be edited")
-                return 2
+                return NOT_FOUND
 
             #rewrite the file with the edited row
             with open(self.auth_path, "w", newline="", encoding="utf-8") as f:
@@ -130,10 +131,10 @@ class Authenticator:
                 writer.writerows(rows)
         except OSError as e:
             self.log.error(f"failed to edit user {username}: {e}")
-            return 1
+            return ERROR
 
         self.log.info(f"user {username} edited, changed fields: {list(changes)}")
-        return 0
+        return SUCCESS
 
     def load_users(self):
         #external version for other modules, same as _load_users but without passwords
@@ -157,9 +158,9 @@ class Authenticator:
         return users
     
     def check_username_password(self, username, password): #given username, check if password is correct
-        #also checks if log in is valid, if user is locked out return 3
+        #also checks if log in is valid, if user is locked out return LOCKED_OUT
 
-        #returns a tuple, first int is status, 0 is success, 1 is failed, 2 is user not found, 3 is locked out.
+        #returns a tuple, first int is status, SUCCESS, PASSWORD_INCORRECT, NOT_FOUND, or LOCKED_OUT
         #second string user level
         #third is a list of allowed meds
 
@@ -167,7 +168,7 @@ class Authenticator:
         user = users.get(username)
         if user is None:
             self.log.warning(f"user {username} attempted log in, user not found")
-            return (2, None, None)
+            return (NOT_FOUND, None, None)
 
         #get values about if the user is locked out
         failed_attempts = int(user["consecutive_failed_attempts"])
@@ -179,7 +180,7 @@ class Authenticator:
                 remaining = int(LOCKOUT_PERIOD - time_since_last_attempt)
                 self.log.warning(f"user {username} attempted log in, locked out for {remaining} more seconds")
                 
-                return (3, None, None)
+                return (LOCKED_OUT, None, None)
             failed_attempts = 0 #lockout period is over, give the user a fresh set of attempts
 
         if user["password"] != str(password):
@@ -188,19 +189,19 @@ class Authenticator:
             #update the last attempt time to now
             self.edit_user(username, consecutive_failed_attempts=failed_attempts, last_login_attempt=time.time())
             self.log.warning(f"user {username} attempted log in, password incorrect, failed attempts: {failed_attempts}")
-            return (1, None, None)
+            return (PASSWORD_INCORRECT, None, None)
 
         #successful log in, reset failed attempts
         self.edit_user(username, consecutive_failed_attempts=0, last_login_attempt=time.time())
         self.log.info(f"user {username} log in successful, user level: {user['level']}")
-        return (0, user["level"], user["allowed_medication"])
+        return (SUCCESS, user["level"], user["allowed_medication"])
 
     def check_username(self, username): #given username, check if it is correct
         #used for log in methods that "self authenticates" such as card or finger print
 
         #can log a user in even if they are password locked out
 
-        #returns a tuple, first int is status, 0 is success, 2 is user not found
+        #returns a tuple, first int is status, SUCCESS or NOT_FOUND
         #second string user level
         #third is a list of allowed meds
 
@@ -208,9 +209,9 @@ class Authenticator:
         user = users.get(username)
         if user is None:
             self.log.warning(f"user {username} attempted log in, user not found")
-            return (2, None, None)
+            return (NOT_FOUND, None, None)
 
         #successful log in, reset failed attempts
         self.edit_user(username, consecutive_failed_attempts=0, last_login_attempt=time.time())
         self.log.info(f"user {username} log in successful, user level: {user['level']}")
-        return (0, user["level"], user["allowed_medication"])
+        return (SUCCESS, user["level"], user["allowed_medication"])
