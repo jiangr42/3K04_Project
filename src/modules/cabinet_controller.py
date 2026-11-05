@@ -3,7 +3,7 @@ from modules.authenticator import Authenticator
 from modules.status_codes import (SUCCESS, ERROR, INVALID_VALUE, REJECTED, NOT_ALLOWED_IN_STATE, USER_ALREADY_LOGGED_IN,
                                   NOT_LOGGED_IN, ACCESS_DENIED)
 from modules.inventory_tracker import InventoryTracker
-from modules.external_motor_driver import CabinetMotorAndSensorDriver
+from modules.cabinet_motor_and_sensor_driver import CabinetMotorAndSensorDriver
 from modules.external_communication_driver import ExternalCommunicationDriver
 from pathlib import Path
 import yaml
@@ -14,6 +14,11 @@ import functools
 
 DEFAULT_ID = "000"
 NUMBER_OF_CABINETS = 4 #cabinets are numbered 1 to NUMBER_OF_CABINETS
+
+#cabinet open time limits, in seconds
+OPEN_WARNING_TIME = 60 #log a warning when a cabinet has been open this long
+OPEN_FAULT_TIME = 180 #enter Fault state when a cabinet has been open this long
+MONITOR_PERIOD = 1 #how often the monitor thread checks the cabinets
 
 ALL_STATES = ["Standby", "Dispensing", "Restocking", "Maintenance", "Locked", "EmergencyShutdown", "Fault"]
 
@@ -34,6 +39,10 @@ CAN_ENTER = {
     "Maintenance": ["Maintenance"],
     "Nurse": ["Dispensing", "Restocking"],
 }
+
+#states medication can't be accessed from, Dispensing and Restocking can't be entered while in one of them
+#a nurse can only log in during Standby, but the cabinet can go into Fault while they are logged in
+NO_MEDICATION_ACCESS_STATES = ["Fault", "Locked", "EmergencyShutdown"]
 
 #user levels allowed to handle medication, admin and maintenance cannot access meds
 CAN_ACCESS_MEDICATION = ["Nurse"]
@@ -76,6 +85,14 @@ class Cabinet_Controller:
         self.authenticator = Authenticator()
         self.inventory_tracker = InventoryTracker(self.number_of_cabinets)
         self.motor_driver = CabinetMotorAndSensorDriver(self.number_of_cabinets)
+
+        #open timer for each cabinet, {cabinet: {"opened_at": time, "warned": bool, "faulted": bool}}
+        #only open cabinets are in it
+        self.open_cabinet_timers = {}
+        self.monitor_stop_event = threading.Event()
+        self.monitor_thread = threading.Thread(target=self._monitor_cabinets, daemon=True)
+        self.monitor_thread.start()
+
         #started last, its thread can call into the controller as soon as it starts
         self.external_communication_driver = ExternalCommunicationDriver(self)
         self.external_communication_driver.start()
@@ -179,7 +196,8 @@ class Cabinet_Controller:
     def change_state(self, state):
         #external method for state setting, used when a logged in user requests a state change
 
-        #returns status code: SUCCESS, NOT_LOGGED_IN, INVALID_VALUE (unknown state), or ACCESS_DENIED
+        #returns status code: SUCCESS, NOT_LOGGED_IN, INVALID_VALUE (unknown state), ACCESS_DENIED,
+        #or NOT_ALLOWED_IN_STATE (Dispensing or Restocking requested during Fault, Locked, or EmergencyShutdown)
         if self.current_username is None:
             self.log.warning(f"state change to {state} requested, no user is logged in")
             return NOT_LOGGED_IN
@@ -191,6 +209,10 @@ class Cabinet_Controller:
         if state not in CAN_ENTER.get(self.current_user_level, []):
             self.log.warning(f"user {self.current_username} attempted to enter {state} state, access denied")
             return ACCESS_DENIED
+
+        if state in ("Dispensing", "Restocking") and self.state in NO_MEDICATION_ACCESS_STATES:
+            self.log.warning(f"user {self.current_username} attempted to enter {state} state during {self.state} state")
+            return NOT_ALLOWED_IN_STATE
 
         return self._set_state(state)
 
@@ -366,9 +388,78 @@ class Cabinet_Controller:
             self.log.info(f"user {self.current_username} closed cabinet {parsed_cabinet}")
         return status
 
+    @_locked
+    def check_inventory(self):
+        #lists every medication in the cabinets, grouped by medication, for any logged in user
+        #only reads the inventory, so it works in any state and cabinets are not opened
+        #medications with a quantity of 0 are left out
+
+        #returns (status, inventory), status is SUCCESS, NOT_LOGGED_IN, or ERROR (inventory file could not be read)
+        #inventory is None unless status is SUCCESS, otherwise it is sorted by medication name:
+        #{medicine: {"total": int, "cabinets": {cabinet: quantity}}}
+        if self.current_username is None:
+            self.log.warning("inventory check requested, no user is logged in")
+            return NOT_LOGGED_IN, None
+
+        rows = self.inventory_tracker.get_inventory()
+        if rows is None:
+            self.log.error(f"inventory check by user {self.current_username} failed, could not read inventory")
+            return ERROR, None
+
+        inventory = {}
+        for row in sorted(rows, key=lambda row: (row["medicine"], row["cabinet"])):
+            if row["quantity"] == 0:
+                continue
+            entry = inventory.setdefault(row["medicine"], {"total": 0, "cabinets": {}})
+            entry["cabinets"][row["cabinet"]] = row["quantity"]
+            entry["total"] += row["quantity"]
+
+        self.log.info(f"user {self.current_username} checked the inventory")
+        return SUCCESS, inventory
+
     def _close_all_cabinets(self):
         #closes every open cabinet, used on log out
         for index, cabinet_state in enumerate(self.motor_driver.get_cabinets_states()):
             if cabinet_state == "open":
                 self.log.info(f"closing cabinet {index + 1} left open by user {self.current_username}")
                 self.motor_driver.close_cabinet(index + 1)
+
+    ################################
+    #CABINET MONITORING
+    ################################
+
+    @_locked
+    def get_cabinet_states(self):
+        #returns the state of each cabinet, {cabinet: "open", "closed", or "fault"}
+        return {index + 1: state for index, state in enumerate(self.motor_driver.get_cabinets_states())}
+
+    @_locked
+    def _check_open_cabinets(self):
+        #runs every MONITOR_PERIOD, warns once at OPEN_WARNING_TIME and enters Fault once at OPEN_FAULT_TIME
+        #timers are based on the "sensor" states, so a cabinet that closes and reopens starts a new timer
+        now = time.monotonic()
+        for cabinet, state in self.get_cabinet_states().items():
+            if state != "open":
+                self.open_cabinet_timers.pop(cabinet, None)
+                continue
+
+            timer = self.open_cabinet_timers.setdefault(cabinet, {"opened_at": now, "warned": False, "faulted": False})
+            open_time = now - timer["opened_at"]
+
+            if open_time >= OPEN_FAULT_TIME and not timer["faulted"]:
+                timer["faulted"] = True
+                self.log.error(f"cabinet {cabinet} has been open for {OPEN_FAULT_TIME} seconds, entering Fault state")
+                if self.state != "Fault":
+                    self._set_state("Fault")
+            elif open_time >= OPEN_WARNING_TIME and not timer["warned"]:
+                timer["warned"] = True
+                self.log.warning(f"cabinet {cabinet} has been open for {OPEN_WARNING_TIME} seconds")
+
+    def _monitor_cabinets(self):
+        #monitor thread loop, stops when monitor_stop_event is set
+        while not self.monitor_stop_event.wait(MONITOR_PERIOD):
+            try:
+                self._check_open_cabinets()
+            except Exception as e:
+                #keep monitoring even if one check fails
+                self.log.error(f"cabinet monitor check failed: {e}")
