@@ -10,6 +10,8 @@ authentication:
 inventory:
   directory: files
   filename: inventory.csv
+  max_medicine_quantity: 100 #max units of a single medicine in one cabinet
+  max_cabinet_quantity: 100 #max units of all medicines combined in one cabinet
 
 external_communication:
   poll_interval: 0.05 #seconds between checks of the serial driver for new messages

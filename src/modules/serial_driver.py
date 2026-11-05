@@ -7,9 +7,6 @@ import queue
 
 import serial
 
-#for testing
-PLACEHOLDERRXMESSAGE = '{ "device_id": "000", "type": "get", "target": "auth_details", "params": { "username": "bob" } }'
-
 class SerialDriver:
     """
     Synchronous-write serial driver with a background RX listener.
@@ -61,7 +58,7 @@ class SerialDriver:
         self.line_ending = line_ending
 
         # create Queue for messages received.
-        self.rx_queue: queue.Queue[bytes] = queue.Queue(maxsize=rx_queue_size)
+        self.rx_queue: queue.Queue[str] = queue.Queue(maxsize=rx_queue_size)
 
 
     #open the serial port
@@ -92,11 +89,35 @@ class SerialDriver:
 
         self.log.info(f"Message sent to Monitoring system on {self.port}: {message}")
 
+    def add_rx_message(self, message):
+        #puts a complete received message on the RX queue, for the RX listener and for testing without hardware
+        #returns True if queued, False if the queue is full or the message is not a string
+        if not isinstance(message, str):
+            self.log.error(f"RX message must be a string, got {type(message).__name__}")
+            return False
+        try:
+            self.rx_queue.put_nowait(message)
+        except queue.Full:
+            #never block the caller, a full queue means messages arrive faster than they are handled
+            self.log.warning(f"RX queue full on {self.port}, dropped message: {message}")
+            return False
+        return True
+
     def read(self):
-        return PLACEHOLDERRXMESSAGE
+        #returns the oldest received message, or None if there are none
+        try:
+            return self.rx_queue.get_nowait()
+        except queue.Empty:
+            return None
 
     def read_all(self):
-        return [PLACEHOLDERRXMESSAGE]
+        #returns every received message in arrival order, empty list if there are none
+        messages = []
+        while True:
+            message = self.read()
+            if message is None:
+                return messages
+            messages.append(message)
 
     def get_status(self):
         return self.status

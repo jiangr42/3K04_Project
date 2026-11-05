@@ -1,8 +1,9 @@
 from modules.event_logger import EventLogger
 from modules.authenticator import Authenticator
-from modules.status_codes import (SUCCESS, INVALID_VALUE, NOT_ALLOWED_IN_STATE, USER_ALREADY_LOGGED_IN,
+from modules.status_codes import (SUCCESS, ERROR, INVALID_VALUE, REJECTED, NOT_ALLOWED_IN_STATE, USER_ALREADY_LOGGED_IN,
                                   NOT_LOGGED_IN, ACCESS_DENIED)
-#from modules.inventory_tracker import InventoryTracker
+from modules.inventory_tracker import InventoryTracker
+from modules.external_motor_driver import CabinetMotorAndSensorDriver
 from modules.external_communication_driver import ExternalCommunicationDriver
 from pathlib import Path
 import yaml
@@ -12,6 +13,7 @@ import threading
 import functools
 
 DEFAULT_ID = "000"
+NUMBER_OF_CABINETS = 4 #cabinets are numbered 1 to NUMBER_OF_CABINETS
 
 ALL_STATES = ["Standby", "Dispensing", "Restocking", "Maintenance", "Locked", "EmergencyShutdown", "Fault"]
 
@@ -33,6 +35,9 @@ CAN_ENTER = {
     "Nurse": ["Dispensing", "Restocking"],
 }
 
+#user levels allowed to handle medication, admin and maintenance cannot access meds
+CAN_ACCESS_MEDICATION = ["Nurse"]
+
 #########################################
 #helpers
 #########################################
@@ -52,6 +57,7 @@ class Cabinet_Controller:
         # state variables
         ################################
         self.ID = DEFAULT_ID
+        self.number_of_cabinets = NUMBER_OF_CABINETS
         self.lock = threading.RLock() #reentrant, since locked methods call each other (delete_user calls logout)
         self.state = "Standby" #can be Dispensing, Restocking
         #Maintenance, Locked, EmergencyShutdown, or Fault state
@@ -68,7 +74,9 @@ class Cabinet_Controller:
         self.log = EventLogger().logger
 
         self.authenticator = Authenticator()
-        #self.inventory_tracker = InventoryTracker()
+        self.inventory_tracker = InventoryTracker(self.number_of_cabinets)
+        self.motor_driver = CabinetMotorAndSensorDriver(self.number_of_cabinets)
+        #started last, its thread can call into the controller as soon as it starts
         self.external_communication_driver = ExternalCommunicationDriver(self)
         self.external_communication_driver.start()
 
@@ -136,6 +144,9 @@ class Cabinet_Controller:
         if self.current_username is None:
             self.log.warning("log out requested, no user is logged in")
             return NOT_LOGGED_IN
+
+        #no cabinet should be left open once the user walks away
+        self._close_all_cabinets()
 
         if self.state != "Locked":
             self._set_state("Standby")
@@ -230,3 +241,134 @@ class Cabinet_Controller:
         except OSError as e:
             self.log.error(f"failed to load users: {e}")
             return None
+
+    ################################
+    #MEDICATION
+    #checks that the logged in user can do the request, then updates the inventory and opens the cabinet
+    ################################
+
+    def _parse_cabinet(self, cabinet):
+        #returns the cabinet as an int from 1 to number_of_cabinets, or None if it is not valid
+        #"1" is accepted since the protocol sends cabinet IDs as strings
+        if isinstance(cabinet, str) and cabinet.strip().isdecimal():
+            cabinet = int(cabinet)
+        if isinstance(cabinet, bool) or not isinstance(cabinet, int) or not 1 <= cabinet <= self.number_of_cabinets:
+            return None
+        return cabinet
+
+    def _check_medication_request(self, action, required_state, cabinet, medicine):
+        #shared checks for add and dispense, logs the reason for any rejection with the user who made the request
+        #returns (status, cabinet, medicine), cabinet and medicine are normalized when status is SUCCESS
+        user = self.current_username
+        if user is None:
+            self.log.warning(f"{action} of {medicine} in cabinet {cabinet} requested, no user is logged in")
+            return NOT_LOGGED_IN, None, None
+
+        if self.current_user_level not in CAN_ACCESS_MEDICATION:
+            self.log.warning(f"user {user} with level {self.current_user_level} attempted {action}, access denied")
+            return ACCESS_DENIED, None, None
+
+        if self.state != required_state:
+            self.log.warning(f"user {user} attempted {action} during state {self.state}, needs state {required_state}")
+            return NOT_ALLOWED_IN_STATE, None, None
+
+        parsed_cabinet = self._parse_cabinet(cabinet)
+        if parsed_cabinet is None:
+            self.log.warning(f"user {user} attempted {action} with invalid cabinet {cabinet!r}, "
+                             f"cabinets are 1 to {self.number_of_cabinets}")
+            return INVALID_VALUE, None, None
+
+        if not isinstance(medicine, str) or not medicine.strip():
+            self.log.warning(f"user {user} attempted {action} with invalid medicine {medicine!r}")
+            return INVALID_VALUE, None, None
+        medicine = medicine.strip().lower() #same as the inventory tracker, names are stored lowercase
+
+        allowed = [med.strip().lower() for med in (self.current_user_allowed_medication or [])]
+        if medicine not in allowed:
+            self.log.warning(f"user {user} attempted {action} of {medicine}, not in their allowed medication")
+            return ACCESS_DENIED, None, None
+
+        if self.motor_driver.get_cabinets_states()[parsed_cabinet - 1] == "fault":
+            self.log.warning(f"user {user} attempted {action} of {medicine} in cabinet {parsed_cabinet}, cabinet is in fault")
+            return REJECTED, None, None
+
+        return SUCCESS, parsed_cabinet, medicine
+
+    @_locked
+    def dispense_medicine(self, cabinet, medicine, quantity):
+        #dispenses medicine for the logged in user, needs Dispensing state and the medicine in the user's allowed medication
+        #the cabinet is opened once the inventory is updated, and stays open until close_cabinet or log out
+
+        #returns status code: SUCCESS, NOT_LOGGED_IN, ACCESS_DENIED, NOT_ALLOWED_IN_STATE, INVALID_VALUE,
+        #REJECTED (not enough stock or cabinet in fault), NOT_FOUND, or ERROR (same as inventory tracker)
+        status, cabinet, medicine = self._check_medication_request("dispense", "Dispensing", cabinet, medicine)
+        if status != SUCCESS:
+            return status
+
+        status = self.inventory_tracker.dispense_medicine(cabinet, medicine, quantity)
+        if status != SUCCESS:
+            self.log.warning(f"user {self.current_username} failed to dispense {quantity!r} of {medicine} "
+                             f"from cabinet {cabinet}, status {status}")
+            return status
+
+        if self.motor_driver.open_cabinet(cabinet) != SUCCESS:
+            #the medicine never left the cabinet, so put it back in the inventory
+            self.log.error(f"cabinet {cabinet} failed to open for user {self.current_username}, undoing dispense of {medicine}")
+            if self.inventory_tracker.add_medicine(cabinet, medicine, quantity) != SUCCESS:
+                self.log.error(f"failed to undo dispense of {quantity} of {medicine} in cabinet {cabinet}, inventory is off")
+            return ERROR
+
+        self.log.info(f"user {self.current_username} dispensed {quantity} of {medicine} from cabinet {cabinet}")
+        return SUCCESS
+
+    @_locked
+    def add_medicine(self, cabinet, medicine, quantity):
+        #restocks medicine for the logged in user, needs Restocking state and the medicine in the user's allowed medication
+        #the cabinet is opened once the inventory is updated, and stays open until close_cabinet or log out
+
+        #returns status code: SUCCESS, NOT_LOGGED_IN, ACCESS_DENIED, NOT_ALLOWED_IN_STATE, INVALID_VALUE,
+        #REJECTED (over a limit or cabinet in fault), or ERROR (same as inventory tracker)
+        status, cabinet, medicine = self._check_medication_request("restock", "Restocking", cabinet, medicine)
+        if status != SUCCESS:
+            return status
+
+        status = self.inventory_tracker.add_medicine(cabinet, medicine, quantity)
+        if status != SUCCESS:
+            self.log.warning(f"user {self.current_username} failed to restock {quantity!r} of {medicine} "
+                             f"in cabinet {cabinet}, status {status}")
+            return status
+
+        if self.motor_driver.open_cabinet(cabinet) != SUCCESS:
+            #the medicine could not be put in, so take it back out of the inventory
+            self.log.error(f"cabinet {cabinet} failed to open for user {self.current_username}, undoing restock of {medicine}")
+            if self.inventory_tracker.dispense_medicine(cabinet, medicine, quantity) != SUCCESS:
+                self.log.error(f"failed to undo restock of {quantity} of {medicine} in cabinet {cabinet}, inventory is off")
+            return ERROR
+
+        self.log.info(f"user {self.current_username} restocked {quantity} of {medicine} in cabinet {cabinet}")
+        return SUCCESS
+
+    @_locked
+    def close_cabinet(self, cabinet):
+        #closes a cabinet after the user is done with it
+        #returns status code: SUCCESS, NOT_LOGGED_IN, or INVALID_VALUE
+        if self.current_username is None:
+            self.log.warning(f"close of cabinet {cabinet} requested, no user is logged in")
+            return NOT_LOGGED_IN
+
+        parsed_cabinet = self._parse_cabinet(cabinet)
+        if parsed_cabinet is None:
+            self.log.warning(f"user {self.current_username} attempted to close invalid cabinet {cabinet!r}")
+            return INVALID_VALUE
+
+        status = self.motor_driver.close_cabinet(parsed_cabinet)
+        if status == SUCCESS:
+            self.log.info(f"user {self.current_username} closed cabinet {parsed_cabinet}")
+        return status
+
+    def _close_all_cabinets(self):
+        #closes every open cabinet, used on log out
+        for index, cabinet_state in enumerate(self.motor_driver.get_cabinets_states()):
+            if cabinet_state == "open":
+                self.log.info(f"closing cabinet {index + 1} left open by user {self.current_username}")
+                self.motor_driver.close_cabinet(index + 1)
